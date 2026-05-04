@@ -1,0 +1,339 @@
+---
+title: "Midterm"
+author: "Nishat"
+format:
+  html:
+    embed-resources: true
+execute:
+  cache: true
+---
+
+## Setup
+
+```{r}
+#| message: false
+#install.packages("tidyverse")
+library(tidyverse)
+
+library(glue)
+
+#install.packages("rio")
+library(rio)
+
+library(fs)
+
+#install.packages("patchwork")
+library(patchwork)
+```
+
+```{r}
+download_file <- function(year) {
+  link <- glue(
+    "https://www.oregon.gov/ode/educator-resources/assessment/TestResults20{year}/pagr_schools_ela_raceethnicity_{year-1}{year}.xlsx"
+  )
+  
+  rio::import(
+    link,
+    setclass = "tibble",
+    na = c("-", "--", "*"))}
+```
+
+# Part A.1 Downloading Clean Data
+
+```{r}
+raw_data <- map_dfr(15:18, download_file)
+
+clean_data <- raw_data |>
+  filter(`Student Group` %in% c("White", "Hispanic/Latino")) |>
+  select(
+    academic_year = `Academic Year`,
+    district = District,
+    school = School,
+    student_group = `Student Group`,
+    grade_level = `Grade Level`,
+    `Number Level 1`,
+    `Number Level 2`,
+    `Number Level 3`,
+    `Number Level 4`
+  ) |>
+  pivot_longer(
+    cols = starts_with("Number Level"),
+    names_to = "level",
+    values_to = "n"
+  ) |>
+  mutate(
+    level = str_remove(level, "Number Level "),
+    n = as.integer(n)
+  ) |>
+  drop_na(n)
+
+clean_data
+```
+
+# Part A.2 Summarizing by district, year, group, and level
+
+```{r}
+new_data <- clean_data |>
+  group_by(academic_year, district, student_group, level) |>
+  summarise(
+    n = sum(n),
+    n_schools = n_distinct(school),
+    .groups = "drop"
+  ) |>
+  mutate(
+    student_group = str_to_lower(student_group),
+    student_group = str_replace_all(student_group, "/", "_")
+  ) |>
+  pivot_wider(
+    names_from = student_group,
+    values_from = n
+  ) |>
+  drop_na(hispanic_latino, white) |>
+  arrange(academic_year, district, level)
+
+new_data
+```
+
+# Part B.1: Estimating Achievement Gaps using `group_by() |> nest() |> map()`
+
+```{r}
+#| message: false
+
+#install.packages(c("RJafroc", "yesno"))
+library(RJafroc)
+library(yesno)
+
+#install.packages("gapr-master", repos = NULL, type = "source")
+library(gapr)
+```
+
+```{r}
+#| warning: false
+v_nested_data <- new_data |>
+  group_by(academic_year, district) |>
+  nest() |>
+  mutate(
+    estimate = map(
+      data,
+      ~estimate_v(.x, "white", "hispanic_latino")
+    )
+  ) |>
+  unnest(estimate) |>
+  select(academic_year, district, data, auc, v, v_se) |>
+  mutate(method = "group_by_nest_map")
+
+v_nested_data
+```
+
+## Part B.1.1 Estimating achievement gaps using `nest_by() |> summarise()` 
+
+```{r}
+#| warning: false
+v_rowwise <- new_data |>
+  nest_by(academic_year, district) |>
+  summarise(
+    estimate_v(data, "white", "hispanic_latino"),
+    .groups = "drop"
+  ) |>
+  mutate(method = "nest_by_summarise")
+
+v_rowwise
+```
+
+# Part B.2 Confirming Same Estimates
+
+```{r}
+comparison <- v_nested_data |>
+  select(academic_year, district, v_nested_data = v) |>
+  left_join(
+    v_rowwise |>
+      select(academic_year, district, v_rowwise = v),
+    by = c("academic_year", "district"))
+
+comparison
+```
+
+
+```{r}
+#ggplot
+ggplot(comparison, aes(x = v_nested_data, y = v_rowwise)) +
+  geom_point(
+    color = "grey60",  
+    alpha = 0.6,
+    size = 2
+  ) +
+  geom_abline(
+    intercept = 0,
+    slope = 1,
+    color = "#56B4E9",  
+    linewidth = 1.2
+  ) +
+  labs(
+    title = "Achievement Gap Estimates Are Equivalent Across Methods",
+    subtitle = "Comparison of group_by() |> nest() |> map() and nest_by() |> summarise()",
+    x = "Estimate from group_by() |> nest() |> map()",
+    y = "Estimate from nest_by() |> summarise()"
+  ) +
+  theme_minimal()
+```
+
+# Part B.3: Creating Plots for the first 100 districts
+
+```{r}
+v_plot_data <- v_nested_data |>
+  select(academic_year, district, v, v_se) |>
+  left_join(
+    new_data |>
+      distinct(academic_year, district, n_schools),
+    by = c("academic_year", "district"))
+
+#first 100 districts
+dists <- unique(v_plot_data$district)[1:100]
+
+v_100 <- v_plot_data |>
+  filter(district %in% dists)
+
+```
+
+
+```{r}
+#function for one district plot
+plot_gap <- function(df, district_name) {
+  schools_caption <- df |>
+    summarise(n_schools = max(n_schools, na.rm = TRUE)) |>
+    pull(n_schools)
+  
+  ggplot(df, aes(x = academic_year, y = v, group = 1)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_point(size = 2) +
+    geom_line() +
+    geom_errorbar(
+      aes(ymin = v - 1.96 * v_se, ymax = v + 1.96 * v_se),
+      width = 0.1
+    ) +
+    labs(
+      title = glue("Achievement Difference: {district_name}"),
+      subtitle = "Hispanic/Latino students compared with White students",
+      caption = glue("Number of schools in district: {schools_caption}"),
+      x = "Academic Year",
+      y = "Achievement difference estimate"
+    ) +
+    theme_minimal()
+}
+```
+
+
+```{r}
+#Method 1: group_by() \|\> nest() \|\> map()
+plots_method_1 <- v_100 |>
+  group_by(district) |>
+  nest() |>
+  mutate(
+    plot = map2(data, district, plot_gap)
+  )
+
+plots_method_1
+
+#first plot
+plots_method_1$plot[[1]]
+```
+
+## Part B.3.1 Alternative method for same plots
+
+```{r}
+#Method 2: nest_by() \|\> mutate()
+plots_method_2 <- v_100 |>
+  ungroup() |>
+  nest_by(district) |>
+  mutate(
+    plot = list(plot_gap(data, district))
+  ) |>
+  ungroup()
+
+plots_method_2
+
+plots_method_2$plot[[1]]
+
+```
+
+# Part B.4: Save plots into `plots` directory
+
+```{r}
+#| warning: false
+dir_create("plots")
+
+# Clean file names
+plots_method_1 <- plots_method_1 |>
+  mutate(
+    file_name = glue(
+      "plots/method_1_{str_replace_all(str_to_lower(district), '[^a-z0-9]+', '_')}.png"
+    )
+  )
+
+plots_method_2 <- plots_method_2 |>
+  mutate(
+    file_name = glue(
+      "plots/method_2_{str_replace_all(str_to_lower(district), '[^a-z0-9]+', '_')}.png"))
+
+# Save method 1 plots
+walk2(
+  plots_method_1$file_name,
+  plots_method_1$plot,
+  ~ggsave(
+    filename = .x,
+    plot = .y,
+    width = 7,
+    height = 5))
+
+# Save method 2 plots
+walk2(
+  plots_method_2$file_name,
+  plots_method_2$plot,
+  ~ggsave(
+    filename = .x,
+    plot = .y,
+    width = 7,
+    height = 5))
+```
+
+# Extra Credit: Combine pairs of plots from both methods
+
+```{r}
+combined_plots <- plots_method_1 |>
+  select(district, plot_1 = plot) |>
+  left_join(
+    plots_method_2 |>
+      select(district, plot_2 = plot),
+    by = "district"
+  ) |>
+  mutate(
+    combined_plot = map2(
+      plot_1,
+      plot_2,
+      ~.x / .y +
+        plot_annotation(
+          title = "Comparison of Plots from Two Methods",
+          subtitle = "Top: group_by() |> nest() |> map(); Bottom: nest_by() |> mutate()",
+          theme = theme(
+            plot.title = element_text(size = 14, face = "bold"),
+            plot.subtitle = element_text(size = 6)
+          ))),
+    file_name = glue(
+      "plots/combined_{str_replace_all(str_to_lower(district), '[^a-z0-9]+', '_')}.png"))
+
+combined_plots
+
+# View first combined plot
+combined_plots$combined_plot[[1]]
+
+
+# Save combined plots
+walk2(
+  combined_plots$file_name,
+  combined_plots$combined_plot,
+  ~ggsave(
+    filename = .x,
+    plot = .y,
+    width = 8,
+    height = 9))
+```
