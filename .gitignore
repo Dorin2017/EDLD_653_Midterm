@@ -4,3 +4,4 @@
 .Ruserdata
 plots/
 *_cache/
+.DS_Store
