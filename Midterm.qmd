@@ -1,0 +1,9 @@
+---
+title: "Midterm"
+author: "Parvez"
+format:
+  html:
+    embed-resources: true
+execute:
+  cache: true
+---
