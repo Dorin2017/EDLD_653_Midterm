@@ -73,24 +73,35 @@ clean_data
 # Part A.2 Summarizing by district, year, group, and level
 
 ```{r}
-new_data <- clean_data |>
+#compute n_schools
+schools_df <- clean_data |>
+  group_by(academic_year, district) |>
+  summarise(
+    n_schools = n_distinct(school),
+    .groups = "drop")
+
+#aggregate counts
+counts_df <- clean_data |>
   group_by(academic_year, district, student_group, level) |>
   summarise(
     n = sum(n),
-    n_schools = n_distinct(school),
-    .groups = "drop"
-  ) |>
+    .groups = "drop") |>
   mutate(
     student_group = str_to_lower(student_group),
-    student_group = str_replace_all(student_group, "/", "_")
-  ) |>
+    student_group = str_replace_all(student_group, "/", "_"))
+
+#pivot wider
+wide_df <- counts_df |>
   pivot_wider(
     names_from = student_group,
-    values_from = n
-  ) |>
+    values_from = n)
+
+new_data <- wide_df |>
+  left_join(schools_df, by = c("academic_year", "district")) |>
   drop_na(hispanic_latino, white) |>
   arrange(academic_year, district, level)
 
+# View result
 new_data
 ```
 
@@ -188,7 +199,10 @@ v_plot_data <- v_nested_data |>
     by = c("academic_year", "district"))
 
 #first 100 districts
-dists <- unique(v_plot_data$district)[1:100]
+dists <- v_plot_data |>
+  distinct(district) |>
+  slice_head(n = 100) |>
+  pull(district)
 
 v_100 <- v_plot_data |>
   filter(district %in% dists)
@@ -200,7 +214,7 @@ v_100 <- v_plot_data |>
 #function for one district plot
 plot_gap <- function(df, district_name) {
   schools_caption <- df |>
-    summarise(n_schools = max(n_schools, na.rm = TRUE)) |>
+    summarise(n_schools = unique(n_schools)[1]) |>
     pull(n_schools)
   
   ggplot(df, aes(x = academic_year, y = v, group = 1)) +
@@ -209,8 +223,7 @@ plot_gap <- function(df, district_name) {
     geom_line() +
     geom_errorbar(
       aes(ymin = v - 1.96 * v_se, ymax = v + 1.96 * v_se),
-      width = 0.1
-    ) +
+      width = 0.1) +
     labs(
       title = glue("Achievement Difference: {district_name}"),
       subtitle = "Hispanic/Latino students compared with White students",
@@ -218,8 +231,7 @@ plot_gap <- function(df, district_name) {
       x = "Academic Year",
       y = "Achievement difference estimate"
     ) +
-    theme_minimal()
-}
+    theme_minimal()}
 ```
 
 
@@ -229,31 +241,28 @@ plots_method_1 <- v_100 |>
   group_by(district) |>
   nest() |>
   mutate(
-    plot = map2(data, district, plot_gap)
-  )
+    plot = map2(data, district, ~ plot_gap(.x, .y)))
 
 plots_method_1
 
-#first plot
+# first plot
 plots_method_1$plot[[1]]
 ```
 
 ## Part B.3.1 Alternative method for same plots
 
 ```{r}
+#| warning: false
 #Method 2: nest_by() \|\> mutate()
 plots_method_2 <- v_100 |>
   ungroup() |>
   nest_by(district) |>
   mutate(
-    plot = list(plot_gap(data, district))
-  ) |>
+    plot = list(plot_gap(data, district))) |>
   ungroup()
 
-plots_method_2
-
+# View first plot
 plots_method_2$plot[[1]]
-
 ```
 
 # Part B.4: Save plots into `plots` directory
